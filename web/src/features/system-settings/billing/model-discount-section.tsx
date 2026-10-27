@@ -16,11 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Code2, Copy, Eye, Plus, Search, Trash2, Wand2 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
+
+import { StaticDataTable } from '@/components/data-table'
+import { Dialog } from '@/components/dialog'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -28,8 +31,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { TitledCard } from '@/components/ui/titled-card'
-import { StaticDataTable } from '@/components/data-table'
-import { Dialog } from '@/components/dialog'
+
 import { getDiscountChannel, getUpstreamChannels } from '../api'
 import { useUpdateOption } from '../hooks/use-update-option'
 import type { UpstreamChannel } from '../types'
@@ -314,9 +316,9 @@ export function ModelDiscountSection({
 
   const addModelsFromChannels = useCallback(
     ({ models, discount, endTime, overwrite }: AddModelsOptions) => {
-      const uniqueModels = Array.from(
-        new Set(models.map((model) => model.trim()).filter(Boolean))
-      ).sort((a, b) => a.localeCompare(b))
+      const uniqueModels = [
+        ...new Set(models.map((model) => model.trim()).filter(Boolean)),
+      ].sort((a, b) => a.localeCompare(b))
       const existingIndex = new Map<string, number>()
       rows.forEach((row, index) => {
         const model = row.model.trim()
@@ -389,6 +391,7 @@ export function ModelDiscountSection({
       description={t(
         'Apply temporary or permanent discounts after model and group pricing.'
       )}
+      className='shrink-0'
       contentClassName='flex flex-col gap-4'
     >
       <Alert>
@@ -555,9 +558,7 @@ export function ModelDiscountSection({
                     value={row.model}
                     placeholder='gpt-4o*'
                     className='font-mono'
-                    onChange={(e) =>
-                      updateRow(row.id, 'model', e.target.value)
-                    }
+                    onChange={(e) => updateRow(row.id, 'model', e.target.value)}
                   />
                   {isWildcardModel(row.model) && (
                     <Badge variant='outline'>{t('Wildcard')}</Badge>
@@ -576,11 +577,7 @@ export function ModelDiscountSection({
                   step={0.01}
                   value={row.discount}
                   onChange={(e) =>
-                    updateRow(
-                      row.id,
-                      'discount',
-                      Number(e.target.value) || 1
-                    )
+                    updateRow(row.id, 'discount', Number(e.target.value) || 1)
                   }
                 />
               ),
@@ -593,9 +590,7 @@ export function ModelDiscountSection({
                 <Input
                   type='datetime-local'
                   value={row.endTime}
-                  onChange={(e) =>
-                    updateRow(row.id, 'endTime', e.target.value)
-                  }
+                  onChange={(e) => updateRow(row.id, 'endTime', e.target.value)}
                 />
               ),
             },
