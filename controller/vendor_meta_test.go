@@ -65,6 +65,7 @@ func setupVendorMetaControllerTestDB(t *testing.T) *gorm.DB {
 		&model.Ability{},
 		&model.Model{},
 		&model.Vendor{},
+		&model.Option{},
 	))
 
 	t.Cleanup(func() {
@@ -532,7 +533,7 @@ func TestDeleteVendorMetaSoftDeletesAndReportsMissingID(t *testing.T) {
 
 	missingResponse := decodeVendorMetaTestResponse(t, missingRecorder)
 	assert.False(t, missingResponse.Success)
-	assert.Equal(t, "供应商不存在", missingResponse.Message)
+	assert.Contains(t, missingResponse.Message, "source vendor does not exist")
 }
 
 func TestDeleteVendorMetaRejectsVendorReferencedByModels(t *testing.T) {
@@ -559,7 +560,7 @@ func TestDeleteVendorMetaRejectsVendorReferencedByModels(t *testing.T) {
 
 	response := decodeVendorMetaTestResponse(t, recorder)
 	assert.False(t, response.Success)
-	assert.Equal(t, "供应商仍被模型引用，请先重新分配或清除相关模型", response.Message)
+	assert.Equal(t, "vendors are still referenced by models; transfer or clear their assignments first", response.Message)
 	_, err := model.GetVendorByID(vendor.Id)
 	require.NoError(t, err)
 }

@@ -1,6 +1,7 @@
 package helper
 
 import (
+	"maps"
 	"math"
 	"strconv"
 	"strings"
@@ -17,9 +18,7 @@ func ResolveIncomingBillingExprRequestInput(c *gin.Context, info *relaycommon.Re
 	if info != nil && info.BillingRequestInput != nil {
 		input := cloneRequestInput(*info.BillingRequestInput)
 		merged := cloneStringMap(info.RequestHeaders)
-		for k, v := range input.Headers {
-			merged[k] = v
-		}
+		maps.Copy(merged, input.Headers)
 		input.Headers = merged
 		return enrichBillingExprRequestInput(info, input), nil
 	}
@@ -42,6 +41,31 @@ func ResolveIncomingBillingExprRequestInput(c *gin.Context, info *relaycommon.Re
 	input.Body = bodyBytes
 	input = mergeContextTaskBillingExprRequestInput(c, input)
 	return enrichBillingExprRequestInput(info, input), nil
+}
+
+// ResolveImageBillingRequestInput freezes only the validated scalar image
+// parameters needed by pricing. Image files, prompts and base64 payloads are
+// deliberately excluded, including for multipart edits.
+func ResolveImageBillingRequestInput(c *gin.Context, info *relaycommon.RelayInfo, input billingexpr.RequestInput) (billingexpr.RequestInput, error) {
+	request, ok := info.Request.(*dto.ImageRequest)
+	if !ok {
+		return input, nil
+	}
+	count, err := request.ImageCount(false)
+	if err != nil {
+		return input, err
+	}
+	body := map[string]any{"model": request.Model, "n": count, "size": request.Size, "quality": request.Quality}
+	if request.BillingParameters != nil {
+		body["parameters"] = request.BillingParameters
+	}
+	encoded, err := common.Marshal(body)
+	if err != nil {
+		return input, err
+	}
+	input.Body = encoded
+	input.ImageCount = &count
+	return input, nil
 }
 
 func BuildBillingExprRequestInputFromRequest(request dto.Request, headers map[string]string) (billingexpr.RequestInput, error) {
@@ -166,13 +190,18 @@ func mergeContextTaskBillingExprRequestInput(c *gin.Context, input billingexpr.R
 		return input
 	}
 	taskReq, ok := value.(relaycommon.TaskSubmitReq)
-	if !ok {
-		return input
-	}
-
 	body := map[string]any{}
 	if len(input.Body) > 0 {
 		_ = common.Unmarshal(input.Body, &body)
+	}
+	if !ok {
+		// Protocol plugins retain their canonical request as a map. Merge it
+		// before normalizing the fork's existing duration/resolution probes.
+		if taskBody, valid := value.(map[string]any); valid {
+			maps.Copy(body, taskBody)
+		} else {
+			return input
+		}
 	}
 	if strings.TrimSpace(taskReq.Model) != "" {
 		body["model"] = taskReq.Model
@@ -204,6 +233,7 @@ func mergeContextTaskBillingExprRequestInput(c *gin.Context, input billingexpr.R
 func resolveTaskBillingResolution(taskReq relaycommon.TaskSubmitReq, body map[string]any) string {
 	for _, candidate := range []any{
 		body["resolution"],
+		body["size"],
 		taskReq.Metadata["resolution"],
 		billingExprMapValue(body["metadata"], "resolution"),
 		taskReq.Size,
@@ -360,6 +390,10 @@ func enrichBillingExprRequestInput(info *relaycommon.RelayInfo, input billingexp
 func cloneRequestInput(src billingexpr.RequestInput) billingexpr.RequestInput {
 	input := billingexpr.RequestInput{
 		Headers: cloneStringMap(src.Headers),
+	}
+	if src.ImageCount != nil {
+		count := *src.ImageCount
+		input.ImageCount = &count
 	}
 	if len(src.Body) > 0 {
 		input.Body = append([]byte(nil), src.Body...)

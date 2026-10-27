@@ -16,16 +16,11 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/codex"
 	"github.com/QuantumNous/new-api/service"
 
-	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 )
 
 type codexOAuthCompleteRequest struct {
 	Input string `json:"input"`
-}
-
-func codexOAuthSessionKey(channelID int, field string) string {
-	return fmt.Sprintf("codex_oauth_%s_%d", field, channelID)
 }
 
 func parseCodexAuthorizationInput(input string) (code string, state string, err error) {
@@ -73,6 +68,11 @@ func StartCodexOAuthForChannel(c *gin.Context) {
 }
 
 func startCodexOAuthWithChannelID(c *gin.Context, channelID int) {
+	setAuthNoStore(c)
+	identity, ok := requireBrowserSession(c)
+	if !ok {
+		return
+	}
 	if channelID > 0 {
 		ch, err := model.GetChannelById(channelID, false)
 		if err != nil {
@@ -95,17 +95,25 @@ func startCodexOAuthWithChannelID(c *gin.Context, channelID int) {
 		return
 	}
 
-	session := sessions.Default(c)
-	session.Set(codexOAuthSessionKey(channelID, "state"), flow.State)
-	session.Set(codexOAuthSessionKey(channelID, "verifier"), flow.Verifier)
-	session.Set(codexOAuthSessionKey(channelID, "created_at"), time.Now().Unix())
-	_ = session.Save()
+	state, err := createChannelOAuthFlow(c, "codex", channelID, channelOAuthFlowPayload{Identity: identity, Verifier: flow.Verifier}, time.Now().Add(oauthAuthFlowTTL))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	authorizeURL, err := url.Parse(flow.AuthorizeURL)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	query := authorizeURL.Query()
+	query.Set("state", state)
+	authorizeURL.RawQuery = query.Encode()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data": gin.H{
-			"authorize_url": flow.AuthorizeURL,
+			"authorize_url": authorizeURL.String(),
 		},
 	})
 }
@@ -124,6 +132,7 @@ func CompleteCodexOAuthForChannel(c *gin.Context) {
 }
 
 func completeCodexOAuthWithChannelID(c *gin.Context, channelID int) {
+	setAuthNoStore(c)
 	req := codexOAuthCompleteRequest{}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		common.ApiError(c, err)
@@ -163,14 +172,11 @@ func completeCodexOAuthWithChannelID(c *gin.Context, channelID int) {
 		channelProxy = ch.GetSetting().Proxy
 	}
 
-	session := sessions.Default(c)
-	expectedState, _ := session.Get(codexOAuthSessionKey(channelID, "state")).(string)
-	verifier, _ := session.Get(codexOAuthSessionKey(channelID, "verifier")).(string)
-	if strings.TrimSpace(expectedState) == "" || strings.TrimSpace(verifier) == "" {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "oauth flow not started or session expired"})
+	flowToken, _, payload, ok := getChannelOAuthFlow(c, "codex", channelID)
+	if !ok {
 		return
 	}
-	if state != expectedState {
+	if state != flowToken || payload.Verifier == "" {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "state mismatch"})
 		return
 	}
@@ -178,7 +184,7 @@ func completeCodexOAuthWithChannelID(c *gin.Context, channelID int) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
 
-	tokenRes, err := service.ExchangeCodexAuthorizationCodeWithProxy(ctx, code, verifier, channelProxy)
+	tokenRes, err := service.ExchangeCodexAuthorizationCodeWithProxy(ctx, code, payload.Verifier, channelProxy)
 	if err != nil {
 		common.SysError("failed to exchange codex authorization code: " + err.Error())
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "授权码交换失败，请重试"})
@@ -207,16 +213,11 @@ func completeCodexOAuthWithChannelID(c *gin.Context, channelID int) {
 		return
 	}
 
-	session.Delete(codexOAuthSessionKey(channelID, "state"))
-	session.Delete(codexOAuthSessionKey(channelID, "verifier"))
-	session.Delete(codexOAuthSessionKey(channelID, "created_at"))
-	_ = session.Save()
+	if !consumeChannelOAuthFlow(c, "codex", channelID, flowToken, payload.Identity, string(encoded)) {
+		return
+	}
 
 	if channelID > 0 {
-		if err := model.DB.Model(&model.Channel{}).Where("id = ?", channelID).Update("key", string(encoded)).Error; err != nil {
-			common.ApiError(c, err)
-			return
-		}
 		model.InitChannelCache()
 		service.ResetProxyClientCache()
 		c.JSON(http.StatusOK, gin.H{

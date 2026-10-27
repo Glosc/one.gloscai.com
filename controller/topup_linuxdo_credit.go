@@ -83,6 +83,9 @@ func RequestLinuxDOCreditAmount(c *gin.Context) {
 		common.ApiErrorMsg(c, err.Error())
 		return
 	}
+	if rejectInvalidTopUpQuota(c, c.GetInt("id"), req.Amount) {
+		return
+	}
 	group, err := model.GetUserGroup(c.GetInt("id"), true)
 	if err != nil {
 		common.ApiErrorMsg(c, "获取用户分组失败")
@@ -108,6 +111,9 @@ func RequestLinuxDOCreditPay(c *gin.Context) {
 	}
 	if err := validateLinuxDOCreditTopUpAmount(req.Amount); err != nil {
 		common.ApiErrorMsg(c, err.Error())
+		return
+	}
+	if rejectInvalidTopUpQuota(c, c.GetInt("id"), req.Amount) {
 		return
 	}
 	group, err := model.GetUserGroup(c.GetInt("id"), true)

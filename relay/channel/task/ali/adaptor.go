@@ -288,10 +288,10 @@ func normalizeWan27Resolution(resolution string) string {
 	return resolution
 }
 
-func stringFromMapValue(data map[string]interface{}, keys ...string) string {
+func stringFromMapValue(data map[string]any, keys ...string) string {
 	current := any(data)
 	for _, key := range keys {
-		m, ok := current.(map[string]interface{})
+		m, ok := current.(map[string]any)
 		if !ok {
 			return ""
 		}
@@ -306,7 +306,7 @@ func stringFromMapValue(data map[string]interface{}, keys ...string) string {
 	return ""
 }
 
-func firstMetadataMediaURL(metadata map[string]interface{}) string {
+func firstMetadataMediaURL(metadata map[string]any) string {
 	if metadata == nil {
 		return ""
 	}
@@ -661,7 +661,7 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 }
 
 // DoResponse handles upstream response
-func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *taskdto.TaskError) {
+func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (parsed *channel.TaskSubmitResponse, taskErr *taskdto.TaskError) {
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
@@ -699,15 +699,17 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	openAIResp.CreatedAt = common.GetTimestamp()
 
 	// 返回 OpenAI 格式
-	c.JSON(http.StatusOK, openAIResp)
 
-	return aliResp.Output.TaskID, responseBody, nil
+	return &channel.TaskSubmitResponse{UpstreamTaskID: aliResp.Output.TaskID, TaskData: responseBody, ClientResponse: openAIResp}, nil
 }
 
 // FetchTask 查询任务状态
-func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
-	taskID, ok := body["task_id"].(string)
-	if !ok {
+func (a *TaskAdaptor) FetchTask(baseUrl, key string, task *model.Task, proxy string) (*http.Response, error) {
+	if task == nil {
+		return nil, fmt.Errorf("task is required")
+	}
+	taskID := task.GetUpstreamTaskID()
+	if taskID == "" {
 		return nil, fmt.Errorf("invalid task_id")
 	}
 
@@ -736,7 +738,7 @@ func (a *TaskAdaptor) GetChannelName() string {
 }
 
 // ParseTaskResult 解析任务结果
-func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, error) {
+func (a *TaskAdaptor) ParseTaskResult(_ *model.Task, _ *http.Response, respBody []byte) (*relaycommon.TaskInfo, error) {
 	var aliResp AliVideoResponse
 	if err := common.Unmarshal(respBody, &aliResp); err != nil {
 		return nil, errors.Wrap(err, "unmarshal task result failed")

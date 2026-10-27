@@ -14,9 +14,9 @@ func insertUserForPaymentGuardTest(t *testing.T, id int, quota int) *User {
 	t.Helper()
 	user := &User{
 		Id:       id,
-		Username: "payment_guard_user",
-		Status:   common.UserStatusEnabled,
-		Quota:    quota,
+		Username: "payment_guard_user", AffCode: "payment_guard_user",
+		Status: common.UserStatusEnabled,
+		Quota:  quota,
 	}
 	require.NoError(t, DB.Create(user).Error)
 	return user
@@ -124,8 +124,8 @@ func TestRechargeDirectTopUp_AppliesAffiliateRebate(t *testing.T) {
 	paymentSetting.ComplianceConfirmed = true
 	paymentSetting.ComplianceTermsVersion = operation_setting.CurrentComplianceTermsVersion
 
-	inviter := &User{Id: 201, Username: "affiliate_inviter", Status: common.UserStatusEnabled}
-	invitee := &User{Id: 202, Username: "affiliate_invitee", Status: common.UserStatusEnabled, InviterId: inviter.Id}
+	inviter := &User{Id: 201, Username: "affiliate_inviter", AffCode: "affiliate_inviter", Status: common.UserStatusEnabled}
+	invitee := &User{Id: 202, Username: "affiliate_invitee", AffCode: "affiliate_invitee", Status: common.UserStatusEnabled, InviterId: inviter.Id}
 	require.NoError(t, DB.Create(inviter).Error)
 	require.NoError(t, DB.Create(invitee).Error)
 	insertTopUpForPaymentGuardTest(t, "affiliate-rebate-order", invitee.Id, PaymentProviderEpay)
@@ -195,8 +195,8 @@ func TestRechargeDirectTopUp_AppliesUserAffiliateRebateOverride(t *testing.T) {
 	paymentSetting.ComplianceTermsVersion = operation_setting.CurrentComplianceTermsVersion
 
 	overrideRatio := 25.0
-	inviter := &User{Id: 203, Username: "affiliate_override_inviter", Status: common.UserStatusEnabled, AffiliateRebateRatio: &overrideRatio}
-	invitee := &User{Id: 204, Username: "affiliate_override_invitee", Status: common.UserStatusEnabled, InviterId: inviter.Id}
+	inviter := &User{Id: 203, Username: "affiliate_override_inviter", AffCode: "affiliate_override_inviter", Status: common.UserStatusEnabled, AffiliateRebateRatio: &overrideRatio}
+	invitee := &User{Id: 204, Username: "affiliate_override_invitee", AffCode: "affiliate_override_invitee", Status: common.UserStatusEnabled, InviterId: inviter.Id}
 	require.NoError(t, DB.Create(inviter).Error)
 	require.NoError(t, DB.Create(invitee).Error)
 	insertTopUpForPaymentGuardTest(t, "affiliate-rebate-override-order", invitee.Id, PaymentProviderEpay)
@@ -236,8 +236,8 @@ func TestRechargeDirectTopUp_UserAffiliateRebateOverrideCanDisable(t *testing.T)
 	paymentSetting.ComplianceTermsVersion = operation_setting.CurrentComplianceTermsVersion
 
 	overrideRatio := 0.0
-	inviter := &User{Id: 205, Username: "affiliate_disabled_inviter", Status: common.UserStatusEnabled, AffiliateRebateRatio: &overrideRatio}
-	invitee := &User{Id: 206, Username: "affiliate_disabled_invitee", Status: common.UserStatusEnabled, InviterId: inviter.Id}
+	inviter := &User{Id: 205, Username: "affiliate_disabled_inviter", AffCode: "affiliate_disabled_inviter", Status: common.UserStatusEnabled, AffiliateRebateRatio: &overrideRatio}
+	invitee := &User{Id: 206, Username: "affiliate_disabled_invitee", AffCode: "affiliate_disabled_invitee", Status: common.UserStatusEnabled, InviterId: inviter.Id}
 	require.NoError(t, DB.Create(inviter).Error)
 	require.NoError(t, DB.Create(invitee).Error)
 	insertTopUpForPaymentGuardTest(t, "affiliate-rebate-disabled-order", invitee.Id, PaymentProviderEpay)
@@ -449,7 +449,7 @@ func TestRechargeEpayRejectsQuotaOverflowBeforeCompletingOrder(t *testing.T) {
 	truncateTables(t)
 
 	oldQuotaPerUnit := common.QuotaPerUnit
-	common.QuotaPerUnit = float64(common.MaxQuota)
+	common.QuotaPerUnit = float64(common.MaxWalletQuota + 1)
 	t.Cleanup(func() { common.QuotaPerUnit = oldQuotaPerUnit })
 
 	user := insertUserForPaymentGuardTest(t, 505, 3)
@@ -459,4 +459,49 @@ func TestRechargeEpayRejectsQuotaOverflowBeforeCompletingOrder(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, 3, getUserQuotaForPaymentGuardTest(t, user.Id))
 	assert.Equal(t, common.TopUpStatusPending, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
+}
+
+func TestRechargeEpayEnforcesFinalWalletQuotaLimit(t *testing.T) {
+	oldQuotaPerUnit := common.QuotaPerUnit
+	common.QuotaPerUnit = 500000
+	t.Cleanup(func() { common.QuotaPerUnit = oldQuotaPerUnit })
+
+	testCases := []struct {
+		name         string
+		currentQuota int
+		wantErr      bool
+		wantQuota    int
+		wantStatus   string
+	}{
+		{
+			name:         "allows exact highest representable wallet balance",
+			currentQuota: common.MaxWalletQuota - 1_000_000,
+			wantQuota:    common.MaxWalletQuota,
+			wantStatus:   common.TopUpStatusSuccess,
+		},
+		{
+			name:         "rejects balance above wallet quota domain",
+			currentQuota: common.MaxWalletQuota - 999_999,
+			wantErr:      true,
+			wantQuota:    common.MaxWalletQuota - 999_999,
+			wantStatus:   common.TopUpStatusPending,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			truncateTables(t)
+			user := insertUserForPaymentGuardTest(t, 506, tc.currentQuota)
+			order := createEpayTestOrder(t, user.Id, "EPAYTESTWALLETLIMIT", PaymentProviderEpay, common.TopUpStatusPending)
+
+			_, err := RechargeEpay(order.TradeNo, "alipay", "127.0.0.1")
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrTopUpQuotaLimitExceeded)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.wantQuota, getUserQuotaForPaymentGuardTest(t, user.Id))
+			assert.Equal(t, tc.wantStatus, getTopUpStatusForPaymentGuardTest(t, order.TradeNo))
+		})
+	}
 }

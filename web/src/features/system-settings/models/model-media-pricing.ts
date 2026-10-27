@@ -179,7 +179,7 @@ function exprNumber(value: number): string {
 }
 
 function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return value.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function withStarSizeAliases(values: string[]): string[] {
@@ -188,7 +188,7 @@ function withStarSizeAliases(values: string[]): string[] {
     aliases.add(value)
     if (value.includes('x')) aliases.add(value.replaceAll('x', '*'))
   })
-  return Array.from(aliases)
+  return [...aliases]
 }
 
 function normalizeVideoResolutionPrices(
@@ -196,7 +196,7 @@ function normalizeVideoResolutionPrices(
 ): VideoResolutionPriceMap {
   return {
     ...DEFAULT_VIDEO_RESOLUTION_PRICES,
-    ...(prices || {}),
+    ...prices,
   }
 }
 
@@ -300,7 +300,7 @@ export function generateMediaUnitExpr(config: MediaUnitConfig): string {
 export function detectMediaPricingMode(
   expr?: string | null
 ): MediaPricingMode | null {
-  if (!expr) return null
+  if (!expr || !/\busd\s*\(/.test(expr)) return null
   if (/tier\(\s*["']image["']/.test(expr)) return 'media-image'
   if (/tier\(\s*["']video["']/.test(expr)) return 'media-video'
   if (/tier\(\s*["']speech["']/.test(expr)) return 'media-audio'
@@ -348,7 +348,7 @@ function readVideoResolutionPrice(
 
 function readSpeechSide(expr: string): SpeechBillingSide {
   const match = expr.match(/seconds\(([^)]+)\)/i)
-  const tokens = match?.[1]?.trim().replace(/\s+/g, ' ')
+  const tokens = match?.[1]?.trim().replaceAll(/\s+/g, ' ')
   if (tokens === 'ai') return 'input'
   if (tokens === 'ao') return 'output'
   return 'both'

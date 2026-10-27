@@ -26,7 +26,7 @@ func setupVendorAutoAddTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err)
 	DB = db
 	LOG_DB = db
-	require.NoError(t, db.AutoMigrate(&Model{}, &Vendor{}))
+	require.NoError(t, db.AutoMigrate(&Model{}, &Vendor{}, &Option{}))
 
 	t.Cleanup(func() {
 		DB = oldDB

@@ -169,7 +169,7 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	contentType := c.GetHeader("Content-Type")
 
 	if strings.HasPrefix(contentType, "application/json") {
-		var bodyMap map[string]interface{}
+		var bodyMap map[string]any
 		if err := common.Unmarshal(cachedBody, &bodyMap); err == nil {
 			bodyMap["model"] = info.UpstreamModelName
 			if newBody, err := common.Marshal(bodyMap); err == nil {
@@ -240,8 +240,8 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	return common.NewReplayableBodyReader(storage), nil
 }
 
-func buildJSONVideoRequestFromForm(values map[string][]string, modelName string) map[string]interface{} {
-	bodyMap := map[string]interface{}{
+func buildJSONVideoRequestFromForm(values map[string][]string, modelName string) map[string]any {
+	bodyMap := map[string]any{
 		"model": modelName,
 	}
 	for key, fieldValues := range values {
@@ -252,7 +252,7 @@ func buildJSONVideoRequestFromForm(values map[string][]string, modelName string)
 			bodyMap[key] = convertVideoFormValue(key, fieldValues[0])
 			continue
 		}
-		items := make([]interface{}, 0, len(fieldValues))
+		items := make([]any, 0, len(fieldValues))
 		for _, value := range fieldValues {
 			items = append(items, convertVideoFormValue(key, value))
 		}
@@ -261,14 +261,14 @@ func buildJSONVideoRequestFromForm(values map[string][]string, modelName string)
 	return bodyMap
 }
 
-func convertVideoFormValue(key string, value string) interface{} {
+func convertVideoFormValue(key string, value string) any {
 	switch key {
 	case "duration", "width", "height", "fps", "n":
 		if intValue, err := strconv.Atoi(value); err == nil {
 			return intValue
 		}
 	case "metadata":
-		var metadata interface{}
+		var metadata any
 		if err := common.Unmarshal([]byte(value), &metadata); err == nil {
 			return metadata
 		}
@@ -282,7 +282,7 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 }
 
 // DoResponse handles upstream response, returns taskID etc.
-func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *dto.TaskError) {
+func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (parsed *channel.TaskSubmitResponse, taskErr *dto.TaskError) {
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
@@ -309,18 +309,25 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	// 使用公开 task_xxxx ID 返回给客户端
 	dResp.ID = info.PublicTaskID
 	dResp.TaskID = info.PublicTaskID
-	c.JSON(http.StatusOK, dResp)
-	return upstreamID, responseBody, nil
+	return &channel.TaskSubmitResponse{UpstreamTaskID: upstreamID, TaskData: responseBody, ClientResponse: dResp}, nil
 }
 
 // FetchTask fetch task status
-func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
-	taskID, ok := body["task_id"].(string)
-	if !ok {
+func (a *TaskAdaptor) FetchTask(baseUrl, key string, task *model.Task, proxy string) (*http.Response, error) {
+	if task == nil {
+		return nil, fmt.Errorf("task is required")
+	}
+	taskID := task.GetUpstreamTaskID()
+	if taskID == "" {
 		return nil, fmt.Errorf("invalid task_id")
 	}
-	modelName, _ := body["model"].(string)
-	videoID, _ := body["video_id"].(string)
+	modelName := task.Properties.OriginModelName
+	if modelName == "" {
+		modelName = task.Properties.UpstreamModelName
+	}
+	var data responseTask
+	_ = common.Unmarshal(task.Data, &data)
+	videoID := data.VideoID
 
 	uri := fmt.Sprintf("%s/v1/videos/%s", baseUrl, taskID)
 	if shouldUseAgnesVideoIDFetch(baseUrl, modelName, videoID) {
@@ -354,7 +361,7 @@ func (a *TaskAdaptor) GetChannelName() string {
 	return ChannelName
 }
 
-func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, error) {
+func (a *TaskAdaptor) ParseTaskResult(_ *model.Task, _ *http.Response, respBody []byte) (*relaycommon.TaskInfo, error) {
 	resTask := responseTask{}
 	if err := common.Unmarshal(respBody, &resTask); err != nil {
 		return nil, errors.Wrap(err, "unmarshal task result failed")

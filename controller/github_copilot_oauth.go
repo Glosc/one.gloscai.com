@@ -13,13 +13,8 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 
-	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 )
-
-func githubCopilotOAuthSessionKey(channelID int, field string) string {
-	return fmt.Sprintf("github_copilot_oauth_%s_%d", field, channelID)
-}
 
 func StartGitHubCopilotOAuth(c *gin.Context) {
 	startGitHubCopilotOAuthWithChannelID(c, 0)
@@ -35,6 +30,15 @@ func StartGitHubCopilotOAuthForChannel(c *gin.Context) {
 }
 
 func startGitHubCopilotOAuthWithChannelID(c *gin.Context, channelID int) {
+	setAuthNoStore(c)
+	identity, ok := requireBrowserSession(c)
+	if !ok {
+		return
+	}
+	if _, _, err := service.ValidateLoginSession(identity); err != nil {
+		writeAuthSessionError(c, err)
+		return
+	}
 	channelProxy, ok := getGitHubCopilotOAuthChannelProxy(c, channelID)
 	if !ok {
 		return
@@ -50,13 +54,11 @@ func startGitHubCopilotOAuthWithChannelID(c *gin.Context, channelID int) {
 		return
 	}
 
-	now := time.Now()
-	session := sessions.Default(c)
-	session.Set(githubCopilotOAuthSessionKey(channelID, "device_code"), flow.DeviceCode)
-	session.Set(githubCopilotOAuthSessionKey(channelID, "expires_at"), now.Add(time.Duration(flow.ExpiresIn)*time.Second).Unix())
-	session.Set(githubCopilotOAuthSessionKey(channelID, "interval"), flow.Interval)
-	session.Set(githubCopilotOAuthSessionKey(channelID, "created_at"), now.Unix())
-	_ = session.Save()
+	_, err = createChannelOAuthFlow(c, "github_copilot", channelID, channelOAuthFlowPayload{Identity: identity, DeviceCode: flow.DeviceCode, Interval: flow.Interval}, time.Now().Add(time.Duration(flow.ExpiresIn)*time.Second))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -85,27 +87,21 @@ func CompleteGitHubCopilotOAuthForChannel(c *gin.Context) {
 }
 
 func completeGitHubCopilotOAuthWithChannelID(c *gin.Context, channelID int) {
+	setAuthNoStore(c)
 	channelProxy, ok := getGitHubCopilotOAuthChannelProxy(c, channelID)
 	if !ok {
 		return
 	}
 
-	session := sessions.Default(c)
-	deviceCode, _ := session.Get(githubCopilotOAuthSessionKey(channelID, "device_code")).(string)
-	expiresAt := sessionValueAsInt64(session.Get(githubCopilotOAuthSessionKey(channelID, "expires_at")))
-	interval := sessionValueAsInt(session.Get(githubCopilotOAuthSessionKey(channelID, "interval")))
-	if deviceCode == "" || expiresAt <= 0 {
+	flowToken, authFlow, payload, ok := getChannelOAuthFlow(c, "github_copilot", channelID)
+	if !ok {
+		return
+	}
+	if payload.DeviceCode == "" {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "oauth flow not started or session expired"})
 		return
 	}
-
-	deadline := time.Unix(expiresAt, 0)
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		clearGitHubCopilotOAuthSession(session, channelID)
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "device code expired, please restart authorization"})
-		return
-	}
+	remaining := time.Until(authFlow.ExpiresAt)
 	if remaining > 65*time.Second {
 		remaining = 65 * time.Second
 	}
@@ -113,16 +109,20 @@ func completeGitHubCopilotOAuthWithChannelID(c *gin.Context, channelID int) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), remaining)
 	defer cancel()
 
-	githubToken, err := service.WaitGitHubCopilotDeviceAccessToken(ctx, deviceCode, interval, channelProxy)
+	githubToken, err := service.WaitGitHubCopilotDeviceAccessToken(ctx, payload.DeviceCode, payload.Interval, channelProxy)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrGitHubCopilotDeviceAuthorizationPending):
 			c.JSON(http.StatusOK, gin.H{"success": false, "message": "authorization pending, please complete GitHub authorization first"})
 		case errors.Is(err, service.ErrGitHubCopilotDeviceAccessDenied):
-			clearGitHubCopilotOAuthSession(session, channelID)
+			if !consumeChannelOAuthFlow(c, "github_copilot", channelID, flowToken, payload.Identity, "") {
+				return
+			}
 			c.JSON(http.StatusOK, gin.H{"success": false, "message": "authorization denied"})
 		case errors.Is(err, service.ErrGitHubCopilotDeviceExpired):
-			clearGitHubCopilotOAuthSession(session, channelID)
+			if !consumeChannelOAuthFlow(c, "github_copilot", channelID, flowToken, payload.Identity, "") {
+				return
+			}
 			c.JSON(http.StatusOK, gin.H{"success": false, "message": "device code expired, please restart authorization"})
 		default:
 			common.SysError("failed to complete github copilot device flow: " + err.Error())
@@ -137,13 +137,11 @@ func completeGitHubCopilotOAuthWithChannelID(c *gin.Context, channelID int) {
 		return
 	}
 
-	clearGitHubCopilotOAuthSession(session, channelID)
+	if !consumeChannelOAuthFlow(c, "github_copilot", channelID, flowToken, payload.Identity, string(encoded)) {
+		return
+	}
 
 	if channelID > 0 {
-		if err := model.DB.Model(&model.Channel{}).Where("id = ?", channelID).Update("key", string(encoded)).Error; err != nil {
-			common.ApiError(c, err)
-			return
-		}
 		model.InitChannelCache()
 		service.ResetProxyClientCache()
 		c.JSON(http.StatusOK, gin.H{
@@ -184,38 +182,4 @@ func getGitHubCopilotOAuthChannelProxy(c *gin.Context, channelID int) (string, b
 		return "", false
 	}
 	return ch.GetSetting().Proxy, true
-}
-
-func clearGitHubCopilotOAuthSession(session sessions.Session, channelID int) {
-	session.Delete(githubCopilotOAuthSessionKey(channelID, "device_code"))
-	session.Delete(githubCopilotOAuthSessionKey(channelID, "expires_at"))
-	session.Delete(githubCopilotOAuthSessionKey(channelID, "interval"))
-	session.Delete(githubCopilotOAuthSessionKey(channelID, "created_at"))
-	_ = session.Save()
-}
-
-func sessionValueAsInt(value any) int {
-	switch v := value.(type) {
-	case int:
-		return v
-	case int64:
-		return int(v)
-	case float64:
-		return int(v)
-	default:
-		return 0
-	}
-}
-
-func sessionValueAsInt64(value any) int64 {
-	switch v := value.(type) {
-	case int:
-		return int64(v)
-	case int64:
-		return v
-	case float64:
-		return int64(v)
-	default:
-		return 0
-	}
 }

@@ -116,7 +116,7 @@ func TestAgentPlanVideoTaskEndpoints(t *testing.T) {
 	require.NotNil(t, resp)
 	require.NoError(t, resp.Body.Close())
 
-	resp, err = adaptor.FetchTask(upstream.URL, credential, map[string]any{"task_id": "task-upstream"}, "")
+	resp, err = adaptor.FetchTask(upstream.URL, credential, &model.Task{TaskID: "task-upstream"}, "")
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 
@@ -162,7 +162,7 @@ func TestAgentPlanVideoTaskEndpoints(t *testing.T) {
 func TestParseAgentPlanCancelledVideoTask(t *testing.T) {
 	adaptor := &TaskAdaptor{}
 
-	result, err := adaptor.ParseTaskResult([]byte(`{"id":"task-upstream","status":"cancelled"}`))
+	result, err := adaptor.ParseTaskResult(nil, nil, []byte(`{"id":"task-upstream","status":"cancelled"}`))
 
 	require.NoError(t, err)
 	require.NotNil(t, result)

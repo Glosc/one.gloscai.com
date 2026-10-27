@@ -64,7 +64,7 @@ func listVendors(c *gin.Context, keyword string) {
 	}
 
 	pageInfo := common.GetPageQuery(c)
-	vendors, total, err := model.ListVendors(filter, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	vendors, total, err := model.ListVendors(filter, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), c.Query("association"))
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -168,7 +168,7 @@ func AutoAddVendors(c *gin.Context) {
 
 	result, err := model.AutoAddVendorsFromCatalog(req.Catalog)
 	if err != nil {
-		common.ApiError(c, err)
+		vendorAPIError(c, err)
 		return
 	}
 	model.RefreshPricing()
@@ -180,12 +180,12 @@ func GetVendorMeta(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
-		common.ApiError(c, err)
+		vendorAPIError(c, err)
 		return
 	}
 	v, err := model.GetVendorByID(id)
 	if err != nil {
-		common.ApiError(c, err)
+		vendorAPIError(c, err)
 		return
 	}
 	common.ApiSuccess(c, v)
@@ -195,7 +195,7 @@ func GetVendorMeta(c *gin.Context) {
 func CreateVendorMeta(c *gin.Context) {
 	var v model.Vendor
 	if err := c.ShouldBindJSON(&v); err != nil {
-		common.ApiError(c, err)
+		vendorAPIError(c, err)
 		return
 	}
 	v.Name = strings.TrimSpace(v.Name)
@@ -222,10 +222,12 @@ func CreateVendorMeta(c *gin.Context) {
 	}
 
 	if err := v.Insert(); err != nil {
-		common.ApiError(c, err)
+		vendorAPIError(c, err)
 		return
 	}
 	model.RefreshPricing()
+
+	recordManageAudit(c, "vendor.metadata.save", map[string]any{"vendor_id": v.Id, "name": v.Name})
 	common.ApiSuccess(c, &v)
 }
 
@@ -233,13 +235,13 @@ func CreateVendorMeta(c *gin.Context) {
 func UpdateVendorMeta(c *gin.Context) {
 	var v model.Vendor
 	if err := c.ShouldBindJSON(&v); err != nil {
-		common.ApiError(c, err)
+		vendorAPIError(c, err)
 		return
 	}
 	v.Name = strings.TrimSpace(v.Name)
 	v.Alias = strings.TrimSpace(v.Alias)
 	if v.Id == 0 {
-		common.ApiErrorMsg(c, "缺少供应商 ID")
+		common.ApiErrorT(c, "Missing vendor ID")
 		return
 	}
 	if v.Name == "" {
@@ -355,31 +357,58 @@ func DeleteVendorMeta(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
-		common.ApiError(c, err)
+		vendorAPIError(c, err)
 		return
 	}
-	v, err := model.GetVendorByID(id)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			common.ApiErrorMsg(c, "供应商不存在")
-			return
-		}
-		common.ApiError(c, err)
+	if err := model.DeleteVendors([]int{id}); err != nil {
+		vendorAPIError(c, err)
 		return
 	}
-	inUse, err := model.IsVendorInUse(id)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	if inUse {
-		common.ApiErrorMsg(c, "供应商仍被模型引用，请先重新分配或清除相关模型")
-		return
-	}
-	if err := v.Delete(); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	model.RefreshPricing()
+	recordManageAudit(c, "vendor.metadata.delete", map[string]any{"vendor_id": id})
 	common.ApiSuccess(c, nil)
+}
+
+func vendorAPIError(c *gin.Context, err error) {
+	status := http.StatusBadRequest
+	payload := gin.H{"success": false, "message": err.Error()}
+	var references *model.VendorReferenceError
+	if errors.Is(err, model.ErrVendorConflict) {
+		status = http.StatusConflict
+		payload["code"] = "VENDOR_CONFLICT"
+	}
+	if errors.As(err, &references) {
+		status = http.StatusConflict
+		payload["code"] = "VENDOR_REFERENCED"
+		payload["reference_counts"] = references.Counts
+	}
+	c.JSON(status, payload)
+}
+
+func PreviewVendorOperation(c *gin.Context) {
+	var request model.VendorOperation
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
+		vendorAPIError(c, err)
+		return
+	}
+	preview, err := model.PreviewVendorOperation(request)
+	if err != nil {
+		vendorAPIError(c, err)
+		return
+	}
+	common.ApiSuccess(c, preview)
+}
+
+func ApplyVendorOperation(c *gin.Context) {
+	var request model.VendorOperation
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
+		vendorAPIError(c, err)
+		return
+	}
+	result, err := model.ApplyVendorOperation(request)
+	if err != nil {
+		vendorAPIError(c, err)
+		return
+	}
+	recordManageAudit(c, "vendor."+request.Action, map[string]any{"source_vendor_ids": request.VendorIDs, "target_vendor_id": request.TargetVendorID, "updated_model_ids": result.UpdatedModels, "deleted_vendor_ids": result.DeletedVendors})
+	common.ApiSuccess(c, result)
 }

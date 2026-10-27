@@ -16,25 +16,26 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
-import { type OnChangeFn, type SortingState } from '@tanstack/react-table'
+import type { OnChangeFn, SortingState } from '@tanstack/react-table'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { DataTablePage, useDataTable } from '@/components/data-table'
+import { ErrorState } from '@/components/error-state'
+import { useModelPricing } from '@/features/model-pricing/api'
 import { useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import {
+  getServerMessage,
+  requireServerSuccess,
+} from '@/lib/server-error-message'
 
 import { getModels, searchModels, getVendors } from '../api'
-import {
-  DEFAULT_PAGE_SIZE,
-  getModelStatusOptions,
-  getPriceStatusOptions,
-  getSyncStatusOptions,
-} from '../constants'
+import { DEFAULT_PAGE_SIZE, getPriceStatusOptions } from '../constants'
 import { modelsQueryKeys, vendorsQueryKeys } from '../lib'
-import type { ModelSortBy } from '../types'
+import type { ModelSortBy, ModelSquareState } from '../types'
 import { DataTableBulkActions } from './data-table-bulk-actions'
 import { useModelsColumns } from './models-columns'
 import { useModels } from './models-provider'
@@ -74,6 +75,7 @@ export function ModelsTable() {
     globalFilter: { enabled: true, key: 'filter' },
     columnFilters: [
       { columnId: 'status', searchKey: 'status', type: 'array' },
+      { columnId: 'square_state', searchKey: 'square_state', type: 'array' },
       { columnId: 'vendor_id', searchKey: 'vendor', type: 'array' },
       { columnId: 'tags', searchKey: 'tag', type: 'array' },
       { columnId: 'categories', searchKey: 'category', type: 'array' },
@@ -85,6 +87,11 @@ export function ModelsTable() {
   // Extract filters from column filters
   const statusFilter =
     (columnFilters.find((f) => f.id === 'status')?.value as string[]) || []
+  const squareState = (
+    columnFilters.find((f) => f.id === 'square_state')?.value as
+      | ModelSquareState[]
+      | undefined
+  )?.[0]
   const vendorFilter =
     (columnFilters.find((f) => f.id === 'vendor_id')?.value as string[]) || []
   const tagFilter =
@@ -100,7 +107,8 @@ export function ModelsTable() {
   // Fetch vendors for filter
   const { data: vendorsData } = useQuery({
     queryKey: vendorsQueryKeys.list(),
-    queryFn: () => getVendors({ page_size: 1000 }),
+    queryFn: async () =>
+      requireServerSuccess(await getVendors({ page_size: 1000 })),
   })
 
   const vendors = useMemo(
@@ -169,77 +177,60 @@ export function ModelsTable() {
     globalFilter?.trim() ||
     activeVendorFilter ||
     statusFilterValue ||
+    activeTagFilter ||
+    activeCategoryFilter ||
+    priceFilter.length > 0 ||
+    squareState ||
     syncFilterValue
   )
 
   // Fetch models data
   // eslint-disable-next-line @tanstack/query/exhaustive-deps
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
     queryKey: modelsQueryKeys.list({
+      include_channel_models: true,
       keyword: globalFilter,
-      vendor: activeVendorFilter,
       tag: activeTagFilter,
       category: activeCategoryFilter,
-      status:
-        statusFilter.length > 0 && !statusFilter.includes('all')
-          ? statusFilter[0]
-          : undefined,
-      sync_official:
-        syncFilter.length > 0 && !syncFilter.includes('all')
-          ? syncFilter[0]
-          : undefined,
-      has_price:
-        priceFilter.length > 0 && !priceFilter.includes('all')
-          ? priceFilter[0]
-          : undefined,
+      has_price: priceFilter[0],
       ...sortParams,
+      vendor: activeVendorFilter,
+      status: statusFilterValue,
+      square_state: squareState,
+      sync_official: syncFilterValue,
       p: pagination.pageIndex + 1,
       page_size: pagination.pageSize,
     }),
     queryFn: async () => {
       if (shouldSearch) {
-        return searchModels({
-          keyword: globalFilter,
-          vendor: activeVendorFilter,
-          tag: activeTagFilter,
-          category: activeCategoryFilter,
-          status:
-            statusFilter.length > 0 && !statusFilter.includes('all')
-              ? statusFilter[0]
-              : undefined,
-          sync_official:
-            syncFilter.length > 0 && !syncFilter.includes('all')
-              ? syncFilter[0]
-              : undefined,
-          has_price:
-            priceFilter.length > 0 && !priceFilter.includes('all')
-              ? priceFilter[0]
-              : undefined,
-          ...sortParams,
-          p: pagination.pageIndex + 1,
-          page_size: pagination.pageSize,
-        })
-      } else {
-        return getModels({
-          tag: activeTagFilter,
-          category: activeCategoryFilter,
-          status:
-            statusFilter.length > 0 && !statusFilter.includes('all')
-              ? statusFilter[0]
-              : undefined,
-          sync_official:
-            syncFilter.length > 0 && !syncFilter.includes('all')
-              ? syncFilter[0]
-              : undefined,
-          has_price:
-            priceFilter.length > 0 && !priceFilter.includes('all')
-              ? priceFilter[0]
-              : undefined,
-          ...sortParams,
-          p: pagination.pageIndex + 1,
-          page_size: pagination.pageSize,
-        })
+        return requireServerSuccess(
+          await searchModels({
+            include_channel_models: true,
+            tag: activeTagFilter,
+            category: activeCategoryFilter,
+            has_price: priceFilter[0],
+            ...sortParams,
+            keyword: globalFilter,
+            vendor: activeVendorFilter,
+            status: statusFilterValue,
+            square_state: squareState,
+            sync_official: syncFilterValue,
+            p: pagination.pageIndex + 1,
+            page_size: pagination.pageSize,
+          })
+        )
       }
+      return requireServerSuccess(
+        await getModels({
+          include_channel_models: true,
+          tag: activeTagFilter,
+          category: activeCategoryFilter,
+          has_price: priceFilter[0],
+          ...sortParams,
+          p: pagination.pageIndex + 1,
+          page_size: pagination.pageSize,
+        })
+      )
     },
   })
 
@@ -250,20 +241,37 @@ export function ModelsTable() {
   const categoryCounts = data?.data?.category_counts
 
   // Columns configuration
-  const columns = useModelsColumns(vendors)
+  const pricingQuery = useModelPricing(
+    models
+      .filter((item) => item.name_rule === 0)
+      .map((item) => item.model_name),
+    models.length > 0
+  )
+  let pricingState: 'loading' | 'error' | undefined
+  if (pricingQuery.isError) pricingState = 'error'
+  else if (pricingQuery.isLoading) pricingState = 'loading'
+  const columns = useModelsColumns(vendors, pricingQuery.data, pricingState)
 
   // React Table instance
   const { table } = useDataTable({
     data: models,
+    getRowId: (model) =>
+      model.id > 0 ? `metadata:${model.id}` : `channel:${model.model_name}`,
     columns,
     totalCount,
     initialColumnVisibility: {
+      has_price: false,
       description: false,
-      bound_channels: false,
-      quota_types: false,
+      id: false,
+      vendor_id: false,
+      name_rule: false,
+      endpoints: false,
+      created_time: false,
+      updated_time: false,
+      status: false,
     },
-    sorting,
     columnFilters,
+    sorting,
     pagination,
     globalFilter,
     enableRowSelection: true,
@@ -287,6 +295,7 @@ export function ModelsTable() {
       value: option.value,
     })),
   ]
+
   const tagFilterOptions = [
     {
       label: t('All Tags'),
@@ -326,27 +335,57 @@ export function ModelsTable() {
     (option) =>
       option.value !== 'all' && option.value !== EMPTY_CATEGORY_FILTER_VALUE
   )
+  if (isError || data?.success === false) {
+    return (
+      <ErrorState
+        description={error?.message ?? getServerMessage(data)}
+        onRetry={() => void refetch()}
+      />
+    )
+  }
 
   return (
     <DataTablePage
+      showMobileBulkActions
+      mobileProps={{ enableRowSelection: true }}
       table={table}
       columns={columns}
       isLoading={isLoading}
       isFetching={isFetching}
       emptyTitle={t('No Models Found')}
-      emptyDescription={t(
-        'No models available. Create your first model to get started.'
-      )}
+      emptyDescription={
+        shouldSearch
+          ? t('Try adjusting your search')
+          : t('No models available. Create your first model to get started.')
+      }
       skeletonKeyPrefix='model-skeleton'
       applyHeaderSize
+      pinnedColumns={[
+        { columnId: 'model_name', side: 'left' },
+        { columnId: 'actions', side: 'right' },
+      ]}
       toolbarProps={{
         searchPlaceholder: t('Filter by model name...'),
         searchDebounceMs: 500,
         filters: [
           {
             columnId: 'status',
-            title: t('Status'),
-            options: [...getModelStatusOptions(t)],
+            title: t('Display policy'),
+            options: [
+              { label: t('Allowed'), value: 'enabled' },
+              { label: t('Not listed'), value: 'disabled' },
+            ],
+            singleSelect: true,
+          },
+          {
+            columnId: 'square_state',
+            title: t('Model square visibility'),
+            options: [
+              { label: t('Displayed'), value: 'visible' },
+              { label: t('Unavailable'), value: 'unavailable' },
+              { label: t('Listing hidden'), value: 'hidden' },
+              { label: t('Partly shown'), value: 'partial' },
+            ],
             singleSelect: true,
           },
           {
@@ -369,8 +408,11 @@ export function ModelsTable() {
           },
           {
             columnId: 'sync_official',
-            title: t('Official Sync'),
-            options: [...getSyncStatusOptions(t)],
+            title: t('Sync policy'),
+            options: [
+              { label: t('Allow updates'), value: 'yes' },
+              { label: t('Keep local'), value: 'no' },
+            ],
             singleSelect: true,
           },
           {

@@ -20,6 +20,8 @@ var autoAddVendorsMu sync.Mutex
 // 本表同样遵循 3NF 设计范式
 
 type Vendor struct {
+	ModelCount  int64          `json:"model_count" gorm:"-"`
+	Version     string         `json:"version,omitempty" gorm:"-"`
 	Id          int            `json:"id"`
 	Name        string         `json:"name" gorm:"size:128;not null;uniqueIndex:uk_vendor_name_delete_at,priority:1"`
 	Alias       string         `json:"alias,omitempty" gorm:"type:varchar(128);index"`
@@ -57,10 +59,20 @@ type AutoAddVendorsResult struct {
 
 // Insert 创建新的供应商记录
 func (v *Vendor) Insert() error {
-	now := common.GetTimestamp()
-	v.CreatedTime = now
-	v.UpdatedTime = now
-	return DB.Create(v).Error
+	v.Id = 0
+	err := metadataTransaction(func(tx *gorm.DB) error {
+		if err := validateVendorMetadata(tx, v); err != nil {
+			return err
+		}
+		now := common.GetTimestamp()
+		v.CreatedTime, v.UpdatedTime, v.Status = now, now, 1
+		return tx.Create(v).Error
+	})
+	if err == nil {
+		v.Version = VendorRecordVersion(v)
+		RefreshPricing()
+	}
+	return err
 }
 
 // IsVendorNameDuplicated 检查供应商名称是否与其他名称或别名冲突（排除自身 ID）
@@ -116,41 +128,29 @@ func IsVendorInUse(id int) (bool, error) {
 
 // Update 更新供应商记录
 func (v *Vendor) Update() error {
-	v.UpdatedTime = common.GetTimestamp()
-	result := DB.Model(&Vendor{}).Where("id = ?", v.Id).
-		Select("name", "alias", "description", "icon", "status", "updated_time").
-		Updates(v)
-	if result.Error != nil {
-		return result.Error
+	err := metadataTransaction(func(tx *gorm.DB) error {
+		var saved Vendor
+		if err := tx.First(&saved, v.Id).Error; err != nil {
+			return err
+		}
+		if v.Version != "" && v.Version != VendorRecordVersion(&saved) {
+			return ErrVendorConflict
+		}
+		if err := validateVendorMetadata(tx, v); err != nil {
+			return err
+		}
+		v.CreatedTime, v.UpdatedTime = saved.CreatedTime, common.GetTimestamp()
+		return tx.Model(&Vendor{}).Where("id = ?", v.Id).Updates(map[string]any{"name": v.Name, "alias": v.Alias, "description": v.Description, "icon": v.Icon, "status": v.Status, "updated_time": v.UpdatedTime}).Error
+	})
+	if err == nil {
+		v.Version = VendorRecordVersion(v)
+		RefreshPricing()
 	}
-	if result.RowsAffected > 0 {
-		return nil
-	}
-
-	var count int64
-	if err := DB.Model(&Vendor{}).Where("id = ?", v.Id).Count(&count).Error; err != nil {
-		return err
-	}
-	if count == 0 {
-		return gorm.ErrRecordNotFound
-	}
-	return nil
+	return err
 }
 
-// Delete 软删除供应商
-func (v *Vendor) Delete() error {
-	if v.Id == 0 {
-		return gorm.ErrRecordNotFound
-	}
-	result := DB.Delete(v)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return gorm.ErrRecordNotFound
-	}
-	return nil
-}
+// Delete rejects referenced vendors rather than leaving orphaned model records.
+func (v *Vendor) Delete() error { return DeleteVendors([]int{v.Id}) }
 
 // GetVendorByID 根据 ID 获取供应商
 func GetVendorByID(id int) (*Vendor, error) {
@@ -159,6 +159,10 @@ func GetVendorByID(id int) (*Vendor, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := DB.Model(&Model{}).Where("vendor_id = ?", id).Count(&v.ModelCount).Error; err != nil {
+		return nil, err
+	}
+	v.Version = VendorRecordVersion(&v)
 	return &v, nil
 }
 
@@ -169,7 +173,7 @@ type VendorListFilter struct {
 }
 
 // ListVendors 按关键字、状态和图标配置筛选供应商。
-func ListVendors(filter VendorListFilter, offset int, limit int) ([]*Vendor, int64, error) {
+func ListVendors(filter VendorListFilter, offset int, limit int, association ...string) ([]*Vendor, int64, error) {
 	db := DB.Model(&Vendor{})
 	if keyword := strings.TrimSpace(filter.Keyword); keyword != "" {
 		like := "%" + keyword + "%"
@@ -185,6 +189,15 @@ func ListVendors(filter VendorListFilter, offset int, limit int) ([]*Vendor, int
 			db = db.Where("icon IS NULL OR TRIM(icon) = ''")
 		}
 	}
+	if len(association) > 0 {
+		references := DB.Model(&Model{}).Select("1").Where("models.vendor_id = vendors.id")
+		switch association[0] {
+		case "linked":
+			db = db.Where("EXISTS (?)", references)
+		case "unlinked":
+			db = db.Where("NOT EXISTS (?)", references)
+		}
+	}
 	var total int64
 	if err := db.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -192,6 +205,14 @@ func ListVendors(filter VendorListFilter, offset int, limit int) ([]*Vendor, int
 	var vendors []*Vendor
 	if err := db.Offset(offset).Limit(limit).Order("id DESC").Find(&vendors).Error; err != nil {
 		return nil, 0, err
+	}
+	counts, err := GetVendorModelCounts()
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, vendor := range vendors {
+		vendor.ModelCount = counts[int64(vendor.Id)]
+		vendor.Version = VendorRecordVersion(vendor)
 	}
 	return vendors, total, nil
 }
@@ -517,4 +538,13 @@ func AutoAddVendorsFromCatalog(catalog []VendorAutoAddCatalogItem) (AutoAddVendo
 		return nil
 	})
 	return result, err
+}
+
+func GetAllVendors(offset, limit int) ([]*Vendor, error) {
+	items, _, err := ListVendors(VendorListFilter{}, offset, limit)
+	return items, err
+}
+
+func SearchVendors(keyword string, offset, limit int, association ...string) ([]*Vendor, int64, error) {
+	return ListVendors(VendorListFilter{Keyword: keyword}, offset, limit, association...)
 }

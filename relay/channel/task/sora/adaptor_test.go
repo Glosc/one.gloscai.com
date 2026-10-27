@@ -17,7 +17,7 @@ import (
 
 func TestParseTaskResultExtractsAgnesVideoURL(t *testing.T) {
 	adaptor := &TaskAdaptor{}
-	taskInfo, err := adaptor.ParseTaskResult([]byte(`{
+	taskInfo, err := adaptor.ParseTaskResult(nil, nil, []byte(`{
 		"id": "task_123",
 		"video_id": "video_123",
 		"model": "agnes-video-v2.0",
@@ -41,11 +41,7 @@ func TestFetchTaskUsesAgnesVideoIDEndpoint(t *testing.T) {
 	defer server.Close()
 
 	adaptor := &TaskAdaptor{}
-	resp, err := adaptor.FetchTask(server.URL, "test-key", map[string]any{
-		"task_id":  "task_123",
-		"video_id": "video_123",
-		"model":    "agnes-video-v2.0",
-	}, "")
+	resp, err := adaptor.FetchTask(server.URL, "test-key", &model.Task{TaskID: "task_123", Properties: model.Properties{OriginModelName: "agnes-video-v2.0"}, Data: []byte(`{"video_id":"video_123"}`)}, "")
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)

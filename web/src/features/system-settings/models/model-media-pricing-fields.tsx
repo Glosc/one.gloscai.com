@@ -24,6 +24,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from 'react'
 import { useTranslation } from 'react-i18next'
+
 import {
   Field,
   FieldDescription,
@@ -39,6 +40,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+
 import {
   getVideoResolutionUnitPrice,
   getMediaKindFromPricingMode,
@@ -52,8 +54,9 @@ import {
 
 function formatNumberDraft(value: number | string): string {
   if (value === '') return ''
-  if (typeof value === 'number')
+  if (typeof value === 'number') {
     return Number.isFinite(value) ? String(value) : '0'
+  }
   return value
 }
 
@@ -145,6 +148,7 @@ function MediaNumberField(props: {
     <Field>
       <FieldLabel>{t(props.labelKey)}</FieldLabel>
       <DraftNumberInput
+        aria-label={t(props.labelKey)}
         min={0}
         step={0.000001}
         value={props.value}

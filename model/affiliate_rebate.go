@@ -2,6 +2,8 @@ package model
 
 import (
 	"errors"
+	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -42,14 +44,18 @@ type AffiliateRebateLog struct {
 	CreatedAt       int64   `json:"created_at"`
 }
 
-func calculateAffiliateRebateQuota(rechargeQuota int, ratio float64) int {
-	if rechargeQuota <= 0 || ratio <= 0 {
-		return 0
+func calculateAffiliateRebateQuota(rechargeQuota int, ratio float64) (int, error) {
+	if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 || ratio > 100 {
+		return 0, fmt.Errorf("affiliate rebate ratio must be finite and between 0 and 100")
 	}
-	return int(decimal.NewFromInt(int64(rechargeQuota)).
+	if rechargeQuota <= 0 || ratio == 0 {
+		return 0, nil
+	}
+	// Affiliate balances retain their existing int32 storage domain even when
+	// the primary wallet accepts larger top-ups. Truncate fractional rewards.
+	return common.QuotaFromDecimalStrict(decimal.NewFromInt(int64(rechargeQuota)).
 		Mul(decimal.NewFromFloat(ratio)).
-		Div(decimal.NewFromInt(100)).
-		IntPart())
+		Div(decimal.NewFromInt(100)).Truncate(0))
 }
 
 func applyAffiliateRebateTx(tx *gorm.DB, topUp *TopUp, rechargeQuota int) (int, error) {
@@ -81,20 +87,32 @@ func applyAffiliateRebateTx(tx *gorm.DB, topUp *TopUp, rechargeQuota int) (int, 
 	if err != nil {
 		return 0, err
 	}
-	rebateQuota := calculateAffiliateRebateQuota(rechargeQuota, rebateRatio)
+	rebateQuota, err := calculateAffiliateRebateQuota(rechargeQuota, rebateRatio)
+	if err != nil {
+		return 0, err
+	}
 	if rebateQuota <= 0 {
 		return 0, nil
 	}
 
-	result := tx.Model(&User{}).Where("id = ?", invitee.InviterId).Updates(map[string]interface{}{
-		"aff_quota":   gorm.Expr("aff_quota + ?", rebateQuota),
-		"aff_history": gorm.Expr("aff_history + ?", rebateQuota),
-	})
+	result := tx.Model(&User{}).
+		Where("id = ? AND aff_quota <= ? AND aff_history <= ?", invitee.InviterId, common.MaxQuota-rebateQuota, common.MaxQuota-rebateQuota).
+		Updates(map[string]any{
+			"aff_quota":   gorm.Expr("aff_quota + ?", rebateQuota),
+			"aff_history": gorm.Expr("aff_history + ?", rebateQuota),
+		})
 	if result.Error != nil {
 		return 0, result.Error
 	}
 	if result.RowsAffected == 0 {
-		return 0, nil
+		var count int64
+		if err := tx.Model(&User{}).Where("id = ?", invitee.InviterId).Count(&count).Error; err != nil {
+			return 0, err
+		}
+		if count == 0 {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("affiliate rebate balance exceeds the supported range")
 	}
 
 	createdAt := topUp.CompleteTime

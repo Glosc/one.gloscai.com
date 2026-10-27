@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
@@ -50,10 +49,8 @@ func (p *WeChatProvider) IsEnabled() bool {
 
 func (p *WeChatProvider) ExchangeToken(ctx context.Context, code string, c *gin.Context) (*OAuthToken, error) {
 	if code == "" {
-		return nil, NewOAuthError(i18n.MsgOAuthInvalidCode, nil)
+		return nil, NewOAuthError(common.NewMessage(msgInvalidCode))
 	}
-
-	logger.LogDebug(ctx, "[OAuth-WeChat] ExchangeToken: code=%s...", code[:min(len(code), 10)])
 
 	endpoint := common.GetEnvOrDefaultString("WECHAT_OAUTH_TOKEN_ENDPOINT", "https://api.weixin.qq.com/sns/oauth2/access_token")
 	requestURL, err := url.Parse(endpoint)
@@ -77,7 +74,7 @@ func (p *WeChatProvider) ExchangeToken(ctx context.Context, code string, c *gin.
 	res, err := client.Do(req)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("[OAuth-WeChat] ExchangeToken error: %s", err.Error()))
-		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "WeChat"}, err.Error())
+		return nil, NewOAuthErrorWithRaw(common.NewMessage(msgConnectFailed, map[string]any{"provider": "WeChat"}), err.Error())
 	}
 	defer res.Body.Close()
 
@@ -92,11 +89,11 @@ func (p *WeChatProvider) ExchangeToken(ctx context.Context, code string, c *gin.
 	if tokenResponse.ErrCode != 0 {
 		raw := fmt.Sprintf("wechat errcode=%d errmsg=%s", tokenResponse.ErrCode, tokenResponse.ErrMsg)
 		logger.LogError(ctx, fmt.Sprintf("[OAuth-WeChat] ExchangeToken failed: %s", raw))
-		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthTokenFailed, map[string]any{"Provider": "WeChat"}, raw)
+		return nil, NewOAuthErrorWithRaw(common.NewMessage(msgTokenFailed, map[string]any{"provider": "WeChat"}), raw)
 	}
 	if tokenResponse.AccessToken == "" || tokenResponse.OpenID == "" {
 		logger.LogError(ctx, "[OAuth-WeChat] ExchangeToken failed: empty access token or openid")
-		return nil, NewOAuthError(i18n.MsgOAuthTokenFailed, map[string]any{"Provider": "WeChat"})
+		return nil, NewOAuthError(common.NewMessage(msgTokenFailed, map[string]any{"provider": "WeChat"}))
 	}
 
 	return &OAuthToken{
@@ -130,7 +127,7 @@ func (p *WeChatProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*O
 	}
 	if providerUserID == "" {
 		logger.LogError(ctx, "[OAuth-WeChat] GetUserInfo failed: empty openid and unionid")
-		return nil, NewOAuthError(i18n.MsgOAuthUserInfoEmpty, map[string]any{"Provider": "WeChat"})
+		return nil, NewOAuthError(common.NewMessage(msgUserInfoEmpty, map[string]any{"provider": "WeChat"}))
 	}
 
 	displayName := ""

@@ -16,24 +16,25 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState } from 'react'
-
 import { useQueryClient } from '@tanstack/react-query'
-import { type Table } from '@tanstack/react-table'
+import type { Table } from '@tanstack/react-table'
 import {
-  Power,
-  PowerOff,
+  Eye,
+  EyeOff,
   Trash2,
   Copy,
   Building2,
+  Unlink,
   Loader2,
   Tags,
   Shapes,
 } from 'lucide-react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { DataTableBulkActions as BulkActionsToolbar } from '@/components/data-table'
+import { MultiSelect, type Option } from '@/components/multi-select'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -57,13 +58,12 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { MultiSelect, type Option } from '@/components/multi-select'
 import { copyToClipboard } from '@/lib/copy-to-clipboard'
+
 import { MODEL_CATEGORY_TAGS, getModelCategoryTagOptions } from '../constants'
 import {
   handleBatchEnableModels,
   handleBatchDisableModels,
-  handleBatchDeleteModels,
   handleBatchUpdateModelVendor,
   handleBatchUpdateModelTags,
   handleBatchUpdateModelCategories,
@@ -71,6 +71,9 @@ import {
   parseModelTags,
 } from '../lib'
 import type { Model, Vendor } from '../types'
+import type { VendorOperation } from '../vendor-api'
+import { ModelDeleteDialog } from './dialogs/model-delete-dialog'
+import { VendorOperationDialog } from './dialogs/vendor-operation-dialog'
 
 interface DataTableBulkActionsProps<TData> {
   table: Table<TData>
@@ -85,6 +88,8 @@ export function DataTableBulkActions<TData>({
 }: DataTableBulkActionsProps<TData>) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  const [vendorOperation, setVendorOperation] =
+    useState<VendorOperation | null>(null)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [showVendorDialog, setShowVendorDialog] = useState(false)
   const [showTagsDialog, setShowTagsDialog] = useState(false)
@@ -101,12 +106,16 @@ export function DataTableBulkActions<TData>({
   const selectedIds = selectedRows.reduce<number[]>((ids, row) => {
     const id = (row.original as Model).id
 
-    if (typeof id === 'number') {
+    if (typeof id === 'number' && id > 0) {
       ids.push(id)
     }
 
     return ids
   }, [])
+
+  const hasMissingMetadata = selectedRows.some(
+    (row) => !((row.original as Model).id > 0)
+  )
 
   const selectedModels = selectedRows.map((row) => row.original as Model)
   const categoryTagSet = new Set<string>(MODEL_CATEGORY_TAGS)
@@ -121,13 +130,6 @@ export function DataTableBulkActions<TData>({
 
   const handleDisableAll = () => {
     handleBatchDisableModels(selectedIds, queryClient, handleClearSelection)
-  }
-
-  const handleDeleteAll = () => {
-    handleBatchDeleteModels(selectedIds, queryClient, () => {
-      setShowDeleteConfirm(false)
-      handleClearSelection()
-    })
   }
 
   const handleVendorChange = (value: string | null) => {
@@ -243,25 +245,99 @@ export function DataTableBulkActions<TData>({
 
   return (
     <>
+      {vendorOperation && (
+        <VendorOperationDialog
+          selection={vendorOperation}
+          onClose={() => setVendorOperation(null)}
+          onSuccess={handleClearSelection}
+        />
+      )}
       <BulkActionsToolbar table={table} entityName='model'>
+        {hasMissingMetadata && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <span
+                  tabIndex={0}
+                  aria-description={t(
+                    'Add metadata to all selected models first.'
+                  )}
+                  className='text-muted-foreground max-w-28 truncate text-xs'
+                />
+              }
+            >
+              {t('Missing metadata')}
+            </TooltipTrigger>
+            <TooltipContent>
+              {t('Add metadata to all selected models first.')}
+            </TooltipContent>
+          </Tooltip>
+        )}
+        <Button
+          variant='outline'
+          size='icon'
+          className='size-8'
+          disabled={hasMissingMetadata}
+          title={t(
+            hasMissingMetadata
+              ? 'Add metadata to all selected models first.'
+              : 'Change vendor'
+          )}
+          aria-label={t('Change vendor')}
+          onClick={() =>
+            setVendorOperation({ action: 'assign', model_ids: selectedIds })
+          }
+        >
+          <Building2 />
+        </Button>
+        <Button
+          variant='outline'
+          size='icon'
+          className='size-8'
+          disabled={hasMissingMetadata}
+          title={t(
+            hasMissingMetadata
+              ? 'Add metadata to all selected models first.'
+              : 'Clear vendor'
+          )}
+          aria-label={t('Clear vendor')}
+          onClick={() =>
+            setVendorOperation({
+              action: 'assign',
+              model_ids: selectedIds,
+              target_vendor_id: 0,
+            })
+          }
+        >
+          <Unlink />
+        </Button>
         <Tooltip>
           <TooltipTrigger
             render={
               <Button
                 variant='outline'
                 size='icon'
+                disabled={hasMissingMetadata}
                 onClick={handleEnableAll}
                 className='size-8'
-                aria-label={t('Enable selected models')}
-                title={t('Enable selected models')}
+                aria-label={t('Show selected models in model square')}
+                title={t('Show selected models in model square')}
               />
             }
           >
-            <Power />
-            <span className='sr-only'>{t('Enable selected models')}</span>
+            <Eye />
+            <span className='sr-only'>
+              {t('Show selected models in model square')}
+            </span>
           </TooltipTrigger>
           <TooltipContent>
-            <p>{t('Enable selected models')}</p>
+            <p>
+              {t(
+                hasMissingMetadata
+                  ? 'Add metadata to all selected models first.'
+                  : 'Show selected models in model square'
+              )}
+            </p>
           </TooltipContent>
         </Tooltip>
 
@@ -271,6 +347,7 @@ export function DataTableBulkActions<TData>({
               <Button
                 variant='outline'
                 size='icon'
+                disabled={hasMissingMetadata}
                 onClick={openTagsDialog}
                 className='size-8'
                 aria-label={t('Update selected models tags')}
@@ -292,6 +369,7 @@ export function DataTableBulkActions<TData>({
               <Button
                 variant='outline'
                 size='icon'
+                disabled={hasMissingMetadata}
                 onClick={openCategoriesDialog}
                 className='size-8'
                 aria-label={t('Update selected models categories')}
@@ -315,18 +393,27 @@ export function DataTableBulkActions<TData>({
               <Button
                 variant='outline'
                 size='icon'
+                disabled={hasMissingMetadata}
                 onClick={handleDisableAll}
                 className='size-8'
-                aria-label={t('Disable selected models')}
-                title={t('Disable selected models')}
+                aria-label={t('Hide selected models from model square')}
+                title={t('Hide selected models from model square')}
               />
             }
           >
-            <PowerOff />
-            <span className='sr-only'>{t('Disable selected models')}</span>
+            <EyeOff />
+            <span className='sr-only'>
+              {t('Hide selected models from model square')}
+            </span>
           </TooltipTrigger>
           <TooltipContent>
-            <p>{t('Disable selected models')}</p>
+            <p>
+              {t(
+                hasMissingMetadata
+                  ? 'Add metadata to all selected models first.'
+                  : 'Hide selected models from model square'
+              )}
+            </p>
           </TooltipContent>
         </Tooltip>
 
@@ -357,6 +444,7 @@ export function DataTableBulkActions<TData>({
               <Button
                 variant='outline'
                 size='icon'
+                disabled={hasMissingMetadata}
                 onClick={() => setShowVendorDialog(true)}
                 className='size-8'
                 aria-label={t('Update selected models vendor')}
@@ -380,6 +468,7 @@ export function DataTableBulkActions<TData>({
               <Button
                 variant='destructive'
                 size='icon'
+                disabled={hasMissingMetadata}
                 onClick={() => setShowDeleteConfirm(true)}
                 className='size-8'
                 aria-label={t('Delete selected models')}
@@ -391,37 +480,24 @@ export function DataTableBulkActions<TData>({
             <span className='sr-only'>{t('Delete selected models')}</span>
           </TooltipTrigger>
           <TooltipContent>
-            <p>{t('Delete selected models')}</p>
+            <p>
+              {t(
+                hasMissingMetadata
+                  ? 'Add metadata to all selected models first.'
+                  : 'Delete selected models'
+              )}
+            </p>
           </TooltipContent>
         </Tooltip>
       </BulkActionsToolbar>
 
-      {/* Delete Confirmation Dialog */}
-      <Dialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t('Delete Models?')}</DialogTitle>
-            <DialogDescription>
-              {t(
-                'Are you sure you want to delete {{count}} model(s)? This action cannot be undone.',
-                { count: selectedIds.length }
-              )}
-            </DialogDescription>
-          </DialogHeader>
-
-          <DialogFooter>
-            <Button
-              variant='outline'
-              onClick={() => setShowDeleteConfirm(false)}
-            >
-              {t('Cancel')}
-            </Button>
-            <Button variant='destructive' onClick={handleDeleteAll}>
-              {t('Delete')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {showDeleteConfirm && (
+        <ModelDeleteDialog
+          models={selectedModels}
+          onClose={() => setShowDeleteConfirm(false)}
+          onSuccess={handleClearSelection}
+        />
+      )}
 
       <Dialog
         open={showTagsDialog}

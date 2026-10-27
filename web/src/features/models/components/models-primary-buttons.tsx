@@ -20,10 +20,9 @@ import { useQueryClient } from '@tanstack/react-query'
 import {
   Plus,
   MoreHorizontal,
-  RefreshCw,
   List,
-  Building2,
   AlertCircle,
+  Building2,
   WandSparkles,
 } from 'lucide-react'
 import { useState } from 'react'
@@ -40,17 +39,29 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Switch } from '@/components/ui/switch'
+import { useCanEditModelPricing } from '@/features/model-pricing/api'
 
 import { handleAutoMatchModelVendors } from '../lib'
 import { useModels } from './models-provider'
 
 export function ModelsPrimaryButtons() {
   const { t } = useTranslation()
-  const queryClient = useQueryClient()
   const { setOpen, setCurrentRow } = useModels()
+  const queryClient = useQueryClient()
   const [showAutoMatchConfirm, setShowAutoMatchConfirm] = useState(false)
   const [overwriteExisting, setOverwriteExisting] = useState(false)
   const [isAutoMatching, setIsAutoMatching] = useState(false)
+  const handleAutoMatch = async () => {
+    setIsAutoMatching(true)
+    try {
+      await handleAutoMatchModelVendors(overwriteExisting, queryClient, () =>
+        setShowAutoMatchConfirm(false)
+      )
+    } finally {
+      setIsAutoMatching(false)
+    }
+  }
+  const canPrice = useCanEditModelPricing()
 
   const handleCreateModel = () => {
     setCurrentRow(null)
@@ -69,31 +80,21 @@ export function ModelsPrimaryButtons() {
     setOpen('prefill-groups')
   }
 
-  const handleManageVendors = () => {
-    setOpen('create-vendor') // Will be a separate vendors management dialog
-  }
-
-  const handleAutoMatchDialogOpenChange = (open: boolean) => {
-    setShowAutoMatchConfirm(open)
-    if (!open) {
-      setOverwriteExisting(false)
-    }
-  }
-
-  const handleAutoMatch = async () => {
-    setIsAutoMatching(true)
-    try {
-      await handleAutoMatchModelVendors(overwriteExisting, queryClient, () => {
-        handleAutoMatchDialogOpenChange(false)
-      })
-    } finally {
-      setIsAutoMatching(false)
-    }
-  }
-
   return (
     <>
-      <div className='flex items-center gap-2'>
+      <div className='flex flex-wrap items-center gap-2'>
+        <Button onClick={handleSync} variant='outline' size='sm'>
+          {t('Sync metadata')}
+        </Button>
+        {canPrice && (
+          <Button
+            onClick={() => setOpen('price-sync')}
+            variant='outline'
+            size='sm'
+          >
+            {t('Sync pricing')}
+          </Button>
+        )}
         {/* Create Model */}
         <Button onClick={handleCreateModel} size='sm'>
           <Plus className='h-4 w-4' />
@@ -102,7 +103,11 @@ export function ModelsPrimaryButtons() {
 
         {/* More Actions */}
         <DropdownMenu>
-          <DropdownMenuTrigger render={<Button variant='outline' size='sm' />}>
+          <DropdownMenuTrigger
+            render={
+              <Button variant='outline' size='sm' aria-label={t('Open menu')} />
+            }
+          >
             <MoreHorizontal className='h-4 w-4' />
           </DropdownMenuTrigger>
           <DropdownMenuContent align='end' className='w-56'>
@@ -113,12 +118,7 @@ export function ModelsPrimaryButtons() {
               </DropdownMenuShortcut>
             </DropdownMenuItem>
 
-            <DropdownMenuItem onClick={handleSync}>
-              {t('Sync Upstream')}
-              <DropdownMenuShortcut>
-                <RefreshCw className='h-4 w-4' />
-              </DropdownMenuShortcut>
-            </DropdownMenuItem>
+            <DropdownMenuSeparator />
 
             <DropdownMenuItem
               onClick={() => setShowAutoMatchConfirm(true)}
@@ -129,17 +129,17 @@ export function ModelsPrimaryButtons() {
                 <WandSparkles className='h-4 w-4' />
               </DropdownMenuShortcut>
             </DropdownMenuItem>
-
-            <DropdownMenuSeparator />
-
             <DropdownMenuItem onClick={handlePrefillGroups}>
               {t('Prefill Groups')}
               <DropdownMenuShortcut>
                 <List className='h-4 w-4' />
               </DropdownMenuShortcut>
             </DropdownMenuItem>
-
-            <DropdownMenuItem onClick={handleManageVendors}>
+            <DropdownMenuItem
+              onClick={() => {
+                window.location.href = '/vendors'
+              }}
+            >
               {t('Manage Vendors')}
               <DropdownMenuShortcut>
                 <Building2 className='h-4 w-4' />
@@ -148,10 +148,9 @@ export function ModelsPrimaryButtons() {
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-
       <ConfirmDialog
         open={showAutoMatchConfirm}
-        onOpenChange={handleAutoMatchDialogOpenChange}
+        onOpenChange={setShowAutoMatchConfirm}
         title={t('Auto Match Vendors')}
         desc={t(
           'Only models with a clear vendor match will be updated with the vendor and its icon. Unmatched or ambiguous models will not be changed.'

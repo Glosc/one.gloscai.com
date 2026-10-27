@@ -134,9 +134,7 @@ func GetAgentPlanVideoTask(c *gin.Context) {
 		return
 	}
 
-	resp, err := client.adaptor.FetchTask(client.channel.GetBaseURL(), client.key, map[string]any{
-		"task_id": c.Param("task_id"),
-	}, client.channel.GetSetting().Proxy)
+	resp, err := client.adaptor.FetchTask(client.channel.GetBaseURL(), client.key, &model.Task{TaskID: c.Param("task_id")}, client.channel.GetSetting().Proxy)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": err.Error()})
 		return

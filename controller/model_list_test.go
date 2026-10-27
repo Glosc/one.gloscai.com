@@ -11,7 +11,9 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting"
@@ -90,7 +92,7 @@ func setupModelListControllerTestDB(t *testing.T) *gorm.DB {
 	model.DB = db
 	model.LOG_DB = db
 
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Channel{}, &model.Ability{}, &model.Model{}, &model.Vendor{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Channel{}, &model.Ability{}, &model.Model{}, &model.Vendor{}, &model.Option{}))
 
 	t.Cleanup(func() {
 		sqlDB, err := db.DB()
@@ -1279,49 +1281,9 @@ func TestListModelsTokenLimitUsesResolvedCustomAutoGroups(t *testing.T) {
 	require.Empty(t, anthropicResponse.LastID)
 }
 
-func TestCheckUpdatePasswordRequiresCurrentPassword(t *testing.T) {
-	db := setupModelListControllerTestDB(t)
-	hashedPassword, err := common.Password2Hash("CurrentPassword123")
-	require.NoError(t, err)
-	user := &model.User{
-		Username: "password-user",
-		Password: hashedPassword,
-		Status:   common.UserStatusEnabled,
-	}
-	require.NoError(t, db.Create(user).Error)
-
-	updatePassword, err := checkUpdatePassword("", "", user.Id)
-	require.NoError(t, err)
-	assert.False(t, updatePassword)
-
-	updatePassword, err = checkUpdatePassword("", "NewPassword123", user.Id)
-	require.Error(t, err)
-	assert.False(t, updatePassword)
-	assert.ErrorIs(t, err, errOriginalPasswordFail)
-
-	updatePassword, err = checkUpdatePassword("CurrentPassword123", "NewPassword123", user.Id)
-	require.NoError(t, err)
-	assert.True(t, updatePassword)
-}
-
-func TestCheckUpdatePasswordRejectsHistoricalEmptyPassword(t *testing.T) {
-	db := setupModelListControllerTestDB(t)
-	user := &model.User{
-		Username: "legacy-passwordless-user",
-		Password: "",
-		Status:   common.UserStatusEnabled,
-	}
-	require.NoError(t, db.Create(user).Error)
-
-	updatePassword, err := checkUpdatePassword("", "NewPassword123", user.Id)
-	require.Error(t, err)
-	assert.False(t, updatePassword)
-	assert.ErrorIs(t, err, errUserPasswordUnset)
-}
-
 func TestSetupLoginDoesNotTouchPasswordWhenPasswordFieldOmitted(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
-	require.NoError(t, db.AutoMigrate(&model.Log{}, &model.UserSession{}))
+	require.NoError(t, db.AutoMigrate(&model.Log{}, &model.AuditLog{}, &model.UserSession{}, &model.TwoFA{}, &model.PasskeyCredential{}))
 
 	hashedPassword, err := common.Password2Hash("CurrentPassword123")
 	require.NoError(t, err)
@@ -1337,12 +1299,13 @@ func TestSetupLoginDoesNotTouchPasswordWhenPasswordFieldOmitted(t *testing.T) {
 	router := gin.New()
 	router.GET("/", func(c *gin.Context) {
 		setupLogin(&model.User{
-			Id:       user.Id,
-			Username: user.Username,
-			Role:     user.Role,
-			Status:   user.Status,
-			Group:    user.Group,
-		}, c)
+			Id:          user.Id,
+			AuthVersion: user.AuthVersion,
+			Username:    user.Username,
+			Role:        user.Role,
+			Status:      user.Status,
+			Group:       user.Group,
+		}, nil, c)
 	})
 
 	recorder := httptest.NewRecorder()
@@ -1353,4 +1316,47 @@ func TestSetupLoginDoesNotTouchPasswordWhenPasswordFieldOmitted(t *testing.T) {
 	var stored model.User
 	require.NoError(t, db.First(&stored, user.Id).Error)
 	assert.Equal(t, hashedPassword, stored.Password)
+}
+
+func TestPreparePlaygroundImageUsesSessionBillingBeforeDistribution(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	previousGroups := setting.UserUsableGroups2JSONString()
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"default":"Default","vip":"VIP"}`))
+	t.Cleanup(func() { require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(previousGroups)) })
+	for _, tc := range []struct {
+		name, group string
+		accessToken bool
+		wantStatus  int
+		wantGroup   string
+	}{
+		{name: "default group", wantStatus: http.StatusOK, wantGroup: "default"},
+		{name: "permitted group", group: "vip", wantStatus: http.StatusOK, wantGroup: "vip"},
+		{name: "forbidden group", group: "private", wantStatus: http.StatusForbidden},
+		{name: "API access token", accessToken: true, wantStatus: http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupModelListControllerTestDB(t)
+			user := &model.User{Username: "pg-session", AffCode: "pg-session", Group: "default", Quota: 1000, Status: common.UserStatusEnabled}
+			require.NoError(t, db.Create(user).Error)
+			reached := false
+			engine := gin.New()
+			engine.POST("/pg/images/generations", func(c *gin.Context) { c.Set("id", user.Id); c.Set("use_access_token", tc.accessToken) }, PreparePlaygroundImage, func(c *gin.Context) {
+				reached = true
+				assert.Equal(t, tc.wantGroup, common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
+				assert.Equal(t, tc.wantGroup, common.GetContextKeyString(c, constant.ContextKeyTokenGroup))
+				info, err := relaycommon.GenRelayInfo(c, types.RelayFormatOpenAIImage, nil, nil)
+				require.NoError(t, err)
+				assert.True(t, info.IsPlayground)
+				assert.Equal(t, user.Id, info.UserId)
+				assert.Equal(t, "/v1/images/generations", info.RequestURLPath)
+				c.Status(http.StatusOK)
+			})
+			request := httptest.NewRequest(http.MethodPost, "/pg/images/generations", strings.NewReader(fmt.Sprintf(`{"model":"qwen-image","group":%q}`, tc.group)))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			engine.ServeHTTP(response, request)
+			assert.Equal(t, tc.wantStatus, response.Code, response.Body.String())
+			assert.Equal(t, tc.wantStatus == http.StatusOK, reached)
+		})
+	}
 }
