@@ -35,31 +35,50 @@ import {
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, it, vi } from 'vitest'
 
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { api } from '@/lib/api'
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { CommonLogsFilterBar } from '../common-logs-filter-bar'
-import { UsageLogsProvider } from '../usage-logs-provider'
+import { UsageLogsProvider, useLogsViewScope } from '../usage-logs-provider'
 
 function FilterFixture() {
+  const { canManageScope, viewScope, setViewScope } = useLogsViewScope()
   const table = useReactTable({
     data: [],
     columns: [],
     getCoreRowModel: getCoreRowModel(),
   })
   return (
-    <UsageLogsProvider>
+    <>
+      {canManageScope && (
+        <Tabs
+          value={viewScope}
+          onValueChange={(value) => {
+            if (value === 'all' || value === 'self') setViewScope(value)
+          }}
+        >
+          <TabsList>
+            <TabsTrigger value='all'>All</TabsTrigger>
+            <TabsTrigger value='self'>Only Mine</TabsTrigger>
+          </TabsList>
+        </Tabs>
+      )}
       <CommonLogsFilterBar table={table} />
-    </UsageLogsProvider>
+    </>
   )
 }
 
-async function renderFilter() {
-  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
-    data: {
-      success: true,
-      data: url === '/api/user/self/groups' ? {} : { quota: 0, rpm: 0, tpm: 0 },
-    },
-  }))
+async function renderFilter(role: number = ROLE.USER) {
+  useAuthStore.getState().auth.setUser({ id: 1, username: 'tester', role })
+  vi.spyOn(api, 'get').mockImplementation(async (url) => {
+    let data: unknown = { quota: 0, rpm: 0, tpm: 0 }
+    if (url === '/api/user/self/groups') data = {}
+    if (url === '/api/group/') data = []
+    if (url === '/api/system-task/current') data = null
+    return { data: { success: true, data } }
+  })
   const root = createRootRoute()
   const auth = createRoute({ getParentRoute: () => root, id: '_authenticated' })
   const logs = createRoute({
@@ -77,16 +96,21 @@ async function renderFilter() {
   })
   render(
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
+      <UsageLogsProvider>
+        <RouterProvider router={router} />
+      </UsageLogsProvider>
     </QueryClientProvider>
   )
   await screen.findByRole('combobox', { name: 'Type' })
+  await waitFor(() => expect(client.isFetching()).toBe(0))
   return router
 }
 
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  useAuthStore.setState(useAuthStore.getInitialState(), true)
+  localStorage.clear()
 })
 
 it('marks only retired log types as deprecated while keeping historical filters selectable', async () => {
@@ -126,5 +150,57 @@ it('marks only retired log types as deprecated while keeping historical filters 
   await userEvent.click(screen.getByRole('button', { name: 'Search' }))
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({ type: ['7'], page: 1 })
+  )
+})
+
+it('shows history cleanup in the root all-logs view and opens its dialog', async () => {
+  await renderFilter(ROLE.SUPER_ADMIN)
+
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Clean history logs' })
+  )
+
+  expect(
+    await screen.findByRole('dialog', { name: 'Clean history logs' })
+  ).toBeVisible()
+  expect(api.get).toHaveBeenCalledWith('/api/system-task/current', {
+    params: { type: 'log_cleanup' },
+  })
+})
+
+it.each([ROLE.ADMIN, ROLE.USER])(
+  'hides history cleanup and avoids cleanup task requests for role %s',
+  async (role) => {
+    await renderFilter(role)
+
+    expect(
+      screen.queryByRole('button', { name: 'Clean history logs' })
+    ).not.toBeInTheDocument()
+    expect(api.get).not.toHaveBeenCalledWith(
+      '/api/system-task/current',
+      expect.anything()
+    )
+  }
+)
+
+it('removes history cleanup and stops task requests when root switches to Only Mine', async () => {
+  await renderFilter(ROLE.SUPER_ADMIN)
+  expect(
+    screen.getByRole('button', { name: 'Clean history logs' })
+  ).toBeVisible()
+  vi.mocked(api.get).mockClear()
+
+  await userEvent.click(screen.getByRole('tab', { name: 'Only Mine' }))
+
+  expect(screen.getByRole('tab', { name: 'Only Mine' })).toHaveAttribute(
+    'aria-selected',
+    'true'
+  )
+  expect(
+    screen.queryByRole('button', { name: 'Clean history logs' })
+  ).not.toBeInTheDocument()
+  expect(api.get).not.toHaveBeenCalledWith(
+    '/api/system-task/current',
+    expect.anything()
   )
 })

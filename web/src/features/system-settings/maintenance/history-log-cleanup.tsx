@@ -16,21 +16,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useEffect, useId, useMemo, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { useEffect, useId, useMemo, useState, type ReactElement } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DateTimePicker } from '@/components/datetime-picker'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
+import { Dialog } from '@/components/dialog'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { formatTimestampToDate } from '@/lib/format'
@@ -77,9 +71,14 @@ function isActiveLogCleanupTask(task: LogCleanupTask | null) {
  * The history log module of the log maintenance page. It deletes the logs
  * created before a chosen time as a background task and shows its progress.
  */
-export function HistoryLogCleanup() {
+export function HistoryLogCleanup(props: { trigger?: ReactElement }) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const titleId = useId()
+  const [open, setOpen] = useState(false)
+  const [isLoadingStatus, setIsLoadingStatus] = useState(true)
+  const [statusLoadFailed, setStatusLoadFailed] = useState(false)
+  const [statusRetry, setStatusRetry] = useState(0)
   const [purgeDate, setPurgeDate] = useState<Date | undefined>(() =>
     getDateDaysAgo(30)
   )
@@ -93,13 +92,18 @@ export function HistoryLogCleanup() {
     let cancelled = false
 
     async function fetchCurrentLogCleanupTask() {
+      setIsLoadingStatus(true)
+      setStatusLoadFailed(false)
       try {
         const res = await getCurrentLogCleanupTask()
-        if (!cancelled && res.success && res.data) {
-          setLogCleanupTask(res.data)
+        if (!res.success) {
+          throw createServerError(res, t('Failed to load log cleanup status.'))
         }
+        if (!cancelled) setLogCleanupTask(res.data ?? null)
       } catch {
-        /* ignore */
+        if (!cancelled) setStatusLoadFailed(true)
+      } finally {
+        if (!cancelled) setIsLoadingStatus(false)
       }
     }
 
@@ -108,7 +112,7 @@ export function HistoryLogCleanup() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [statusRetry, t])
 
   const purgeTimestamp = useMemo(() => {
     if (!purgeDate) return null
@@ -142,6 +146,13 @@ export function HistoryLogCleanup() {
         setLogCleanupTask(res.data)
         if (!isActiveLogCleanupTask(res.data)) {
           if (res.data.status === 'succeeded') {
+            void queryClient.invalidateQueries({ queryKey: ['logs'] })
+            void queryClient.invalidateQueries({
+              queryKey: ['model-call-logs'],
+            })
+            void queryClient.invalidateQueries({
+              queryKey: ['usage-logs-stats'],
+            })
             const count =
               res.data.result?.deleted_count ?? res.data.state?.processed ?? 0
             toast.success(
@@ -162,11 +173,16 @@ export function HistoryLogCleanup() {
       cancelled = true
       window.clearInterval(interval)
     }
-  }, [logCleanupActive, logCleanupTaskId, t])
+  }, [logCleanupActive, logCleanupTaskId, queryClient, t])
 
   const handleRequestCleanLogs = () => {
-    if (!purgeTimestamp) {
-      toast.error(t('Select a timestamp before clearing logs.'))
+    if (
+      purgeTimestamp === null ||
+      !Number.isFinite(purgeTimestamp) ||
+      purgeTimestamp <= 0 ||
+      purgeTimestamp > Math.floor(Date.now() / 1000)
+    ) {
+      toast.error(t('Select a valid timestamp in the past.'))
       return
     }
 
@@ -174,8 +190,21 @@ export function HistoryLogCleanup() {
   }
 
   const handleCleanLogs = async () => {
-    if (!purgeTimestamp) {
-      toast.error(t('Select a timestamp before clearing logs.'))
+    if (
+      purgeTimestamp === null ||
+      !Number.isFinite(purgeTimestamp) ||
+      purgeTimestamp <= 0 ||
+      purgeTimestamp > Math.floor(Date.now() / 1000)
+    ) {
+      toast.error(t('Select a valid timestamp in the past.'))
+      return
+    }
+    if (
+      isLoadingStatus ||
+      statusLoadFailed ||
+      isStartingLogCleanup ||
+      logCleanupActive
+    ) {
       return
     }
 
@@ -200,43 +229,83 @@ export function HistoryLogCleanup() {
     }
   }
 
-  return (
+  const content = (
     <div
       role='group'
       aria-labelledby={titleId}
       className='flex min-w-0 flex-col gap-4'
     >
       <div>
-        <h4 id={titleId} className='font-medium'>
+        <h4 id={titleId} className={props.trigger ? 'sr-only' : 'font-medium'}>
           {t('Clean history logs')}
         </h4>
         <p className='text-muted-foreground mt-1 text-xs'>
-          {t('Remove all log entries created before the selected timestamp.')}
+          {t(
+            "Deletes all users' general logs and saved model inputs and outputs before the selected time. Current filters do not apply."
+          )}
         </p>
       </div>
-      <DateTimePicker value={purgeDate} onChange={setPurgeDate} />
-      <div className='flex flex-wrap gap-3'>
-        {quickSelectOptions.map((option) => (
+      <fieldset
+        disabled={
+          isLoadingStatus ||
+          statusLoadFailed ||
+          isStartingLogCleanup ||
+          logCleanupActive
+        }
+        className='flex min-w-0 flex-col gap-4'
+      >
+        <DateTimePicker
+          value={purgeDate}
+          onChange={setPurgeDate}
+          className='flex-wrap'
+        />
+        <div className='flex flex-wrap gap-3'>
+          {quickSelectOptions.map((option) => (
+            <Button
+              key={option.label}
+              type='button'
+              variant='outline'
+              onClick={() => setPurgeDate(option.getValue())}
+            >
+              {t(option.label)}
+            </Button>
+          ))}
           <Button
-            key={option.label}
             type='button'
-            variant='outline'
-            onClick={() => setPurgeDate(option.getValue())}
+            variant='destructive'
+            onClick={handleRequestCleanLogs}
+            aria-busy={isStartingLogCleanup || logCleanupActive}
           >
-            {t(option.label)}
+            {isStartingLogCleanup || logCleanupActive
+              ? t('Cleaning...')
+              : t('Clean logs')}
           </Button>
-        ))}
-        <Button
-          type='button'
-          variant='destructive'
-          onClick={handleRequestCleanLogs}
-          disabled={isStartingLogCleanup || logCleanupActive}
-        >
-          {isStartingLogCleanup || logCleanupActive
-            ? t('Cleaning...')
-            : t('Clean logs')}
-        </Button>
-      </div>
+        </div>
+      </fieldset>
+      {statusLoadFailed && (
+        <Alert variant='destructive'>
+          <AlertDescription>
+            {t('Failed to load log cleanup status.')}
+            <Button
+              type='button'
+              variant='outline'
+              onClick={() => setStatusRetry((value) => value + 1)}
+            >
+              {t('Retry')}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+      <Alert>
+        <AlertDescription>
+          <p>{t('Audit logs, task records, and server log files are kept.')}</p>
+          <p>
+            {t(
+              'Deleting logs makes database space reusable, but may not immediately reduce disk usage.'
+            )}
+          </p>
+        </AlertDescription>
+      </Alert>
       {logCleanupTask && (
         <div className='rounded-md border p-3'>
           <div className='mb-2 flex items-center justify-between gap-3 text-sm'>
@@ -245,7 +314,10 @@ export function HistoryLogCleanup() {
               {logCleanupProgress}%
             </span>
           </div>
-          <Progress value={logCleanupProgress} />
+          <Progress
+            value={logCleanupProgress}
+            aria-label={t('Log cleanup progress')}
+          />
           <div className='text-muted-foreground mt-2 text-xs'>
             {t('{{processed}} of {{total}} log entries processed.', {
               processed: logCleanupProcessed,
@@ -260,36 +332,41 @@ export function HistoryLogCleanup() {
         </div>
       )}
 
-      <AlertDialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t('Confirm log cleanup')}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {formattedPurgeDate
-                ? t(
-                    'This will permanently remove all log entries created before {{date}}.',
-                    { date: formattedPurgeDate }
-                  )
-                : t(
-                    'This will permanently remove log entries before the selected timestamp.'
-                  )}{' '}
-              {t('This action cannot be undone.')}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={isStartingLogCleanup}>
-              {t('Cancel')}
-            </AlertDialogCancel>
-            <AlertDialogAction
-              variant='destructive'
-              onClick={handleCleanLogs}
-              disabled={isStartingLogCleanup}
-            >
-              {isStartingLogCleanup ? t('Cleaning...') : t('Delete logs')}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmDialog
+        open={showConfirmDialog}
+        onOpenChange={setShowConfirmDialog}
+        title={t('Confirm log cleanup')}
+        desc={
+          <>
+            {t(
+              "This will permanently remove all users' general logs created before {{date}}, including saved model inputs and outputs.",
+              { date: formattedPurgeDate }
+            )}{' '}
+            {t('This action cannot be undone.')}
+          </>
+        }
+        destructive
+        isLoading={isStartingLogCleanup}
+        confirmText={isStartingLogCleanup ? t('Cleaning...') : t('Delete logs')}
+        handleConfirm={handleCleanLogs}
+      />
     </div>
+  )
+
+  if (!props.trigger) return content
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={setOpen}
+      trigger={props.trigger}
+      title={t('Clean history logs')}
+      description={t(
+        'Cleanup continues in the background when this dialog is closed.'
+      )}
+      contentClassName='sm:max-w-xl'
+    >
+      {content}
+    </Dialog>
   )
 }

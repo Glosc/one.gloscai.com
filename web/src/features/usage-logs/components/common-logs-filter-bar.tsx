@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQueryClient, useIsFetching, useQuery } from '@tanstack/react-query'
 import { useNavigate, getRouteApi } from '@tanstack/react-router'
 import type { Table } from '@tanstack/react-table'
-import { Eye, EyeOff } from 'lucide-react'
+import { Eye, EyeOff, Trash2 } from 'lucide-react'
 import { useState, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -39,6 +39,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { HistoryLogCleanup } from '@/features/system-settings/maintenance/history-log-cleanup'
 import { getGroups } from '@/features/users/api'
 import { useMediaQuery } from '@/hooks'
 import { getUserGroups } from '@/lib/api'
@@ -124,7 +125,7 @@ export function CommonLogsFilterBar<TData>(
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const searchParams = route.useSearch()
-  const { isAdminView: isAdmin } = useLogsViewScope()
+  const { isAdminView: isAdmin, isRootView } = useLogsViewScope()
   const { sensitiveVisible, setSensitiveVisible } = useUsageLogsContext()
   const fetchingLogs = useIsFetching({ queryKey: ['logs'] })
   const { data: adminGroups } = useQuery({
@@ -490,7 +491,21 @@ export function CommonLogsFilterBar<TData>(
       compactMobile
       stats={statsBar}
       actionStart={sensitiveToggle}
-      actionEnd={<ExportLogsDialog />}
+      actionEnd={
+        <>
+          {isRootView && (
+            <HistoryLogCleanup
+              trigger={
+                <Button type='button' variant='outline'>
+                  <Trash2 aria-hidden='true' />
+                  {t('Clean history logs')}
+                </Button>
+              }
+            />
+          )}
+          <ExportLogsDialog />
+        </>
+      }
       primaryFilters={
         <>
           {dateRangeFilter}
